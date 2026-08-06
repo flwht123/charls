@@ -22,7 +22,7 @@ from sklearn.metrics import (average_precision_score, brier_score_loss, confusio
 from sklearn.mixture import GaussianMixture
 from sklearn.model_selection import GridSearchCV, StratifiedKFold, train_test_split
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from xgboost import XGBClassifier
 
 RNG = 42
@@ -68,6 +68,13 @@ def enumerate_gmm(values: np.ndarray, waves: list[str], seed: int = RNG):
 THRESHOLDS = [0.05, 0.10, 0.138, 0.20, 0.30, 0.40, 0.50]
 
 
+# Marital status carries the non-consecutive Harmonized CHARLS codes 1/3/4/5/7/8, so an
+# ordered numeric representation would impose distances that have no substantive meaning.
+FEATS_NOMINAL = ["r1mstat"]                      # one-hot, reference = code 1 (married)
+FEATS_ORDINAL = ["raeduc_c", "r1shlt"]           # monotone levels, kept as ordered codes
+# everything else in FEATS_CAT is binary (0/1 or 1/2) and needs no encoding.
+
+
 def design(df: pd.DataFrame, features: list[str] | None = None):
     features = features or FEATS_NUM + FEATS_CAT
     num = [c for c in FEATS_NUM if c in features]
@@ -77,10 +84,18 @@ def design(df: pd.DataFrame, features: list[str] | None = None):
         if c in x:
             x[c + "_miss"] = x[c].isna().astype(int)
             cat.append(c + "_miss")
-    pre = ColumnTransformer([
+    nominal = [c for c in cat if c in FEATS_NOMINAL]
+    plain = [c for c in cat if c not in nominal]
+    blocks = [
         ("num", Pipeline([("imp", SimpleImputer(strategy="median")), ("scale", StandardScaler())]), num),
-        ("cat", SimpleImputer(strategy="most_frequent"), cat),
-    ], verbose_feature_names_out=False)
+        ("cat", SimpleImputer(strategy="most_frequent"), plain),
+    ]
+    if nominal:
+        blocks.append(("nom", Pipeline([
+            ("imp", SimpleImputer(strategy="most_frequent")),
+            ("oh", OneHotEncoder(drop="first", handle_unknown="ignore", sparse_output=False)),
+        ]), nominal))
+    pre = ColumnTransformer(blocks, verbose_feature_names_out=False)
     return x, pre
 
 
@@ -88,7 +103,8 @@ def estimators(pre, spw: float, quick: bool):
     trees = 80 if quick else 500
     return {
         "Logistic": Pipeline([("pre", clone(pre)), ("model", LogisticRegression(
-            max_iter=2000, solver="lbfgs", class_weight="balanced", random_state=RNG))]),
+            penalty="l2", C=1.0, max_iter=2000, solver="lbfgs", class_weight="balanced",
+            random_state=RNG))]),
         "RandomForest": Pipeline([("pre", clone(pre)), ("model", RandomForestClassifier(
             n_estimators=trees, min_samples_leaf=5, class_weight="balanced", n_jobs=-1,
             random_state=RNG))]),
@@ -142,16 +158,222 @@ def midrank(x):
     return out
 
 
+def percentile_ci(y, p, fn, boots, seed=RNG):
+    """Percentile bootstrap interval for any metric of (y_true, y_score).
+
+    Brier and PR-AUC are resampled on the same locked split and the same 2,000-resample
+    basis as the AUC.
+    """
+    rng = np.random.default_rng(seed); vals = []
+    for _ in range(boots):
+        ix = rng.integers(0, len(y), len(y))
+        if np.unique(y[ix]).size == 2:
+            vals.append(fn(y[ix], p[ix]))
+    return float(np.percentile(vals, 2.5)), float(np.percentile(vals, 97.5))
+
+
+def holm_adjust(pvals):
+    """Holm step-down adjusted P values, monotone-enforced, capped at one."""
+    p = np.asarray(pvals, dtype=float); order = np.argsort(p)
+    adj = np.empty(len(p)); running = 0.0
+    for rank, idx in enumerate(order):
+        running = max(running, (len(p) - rank) * p[idx])
+        adj[idx] = min(running, 1.0)
+    return adj
+
+
 def delong(y, a, b):
     order = np.argsort(-np.asarray(y)); m = int(np.sum(y)); preds = np.vstack([a, b])[:, order]
+    # n is the number of negatives, read off the sample axis.
+    n = preds.shape[1] - m
     pos, neg = preds[:, :m], preds[:, m:]; tx = np.array([midrank(x) for x in pos])
     ty = np.array([midrank(x) for x in neg]); tz = np.array([midrank(x) for x in preds])
-    auc = (tz[:, :m].sum(1) / m - (m + 1) / 2) / len(neg)
-    v01 = (tz[:, :m] - tx) / len(neg); v10 = 1 - (tz[:, m:] - ty) / m
-    cov = np.cov(v01) / m + np.cov(v10) / len(neg)
+    auc = (tz[:, :m].sum(1) / m - (m + 1) / 2) / n
+    v01 = (tz[:, :m] - tx) / n; v10 = 1 - (tz[:, m:] - ty) / m
+    cov = np.cov(v01) / m + np.cov(v10) / n
     var = max(float(np.array([1, -1]) @ cov @ np.array([1, -1])), 1e-15)
     z = (auc[0] - auc[1]) / np.sqrt(var)
     return float(auc[0] - auc[1]), float(2 * (1 - NormalDist().cdf(abs(z))))
+
+
+PALETTE = ["#4E79A7", "#59A14F", "#F28E2B", "#E15759", "#B07AA1"]
+
+FEATURE_LABELS = {
+    "r1arthre": "Arthritis", "r1shlt": "Self-rated health", "ragender": "Sex (female)",
+    "r1tr20": "Word recall (cognitive)", "hh1ahous": "Housing assets",
+    "r1gripsum": "Grip strength", "r1agey": "Age", "r1adla_c": "ADL limitations",
+    "r1ser7": "Serial 7s (cognitive)", "r1mbmi": "BMI", "r1orient": "Orientation (cognitive)",
+    "r1walk1kma": "Difficulty walking 1km", "h1rural": "Rural residence",
+    "raeduc_c": "Education level", "r1socwk": "Social activity", "r1mstat": "Marital status",
+    "r1hearte": "Heart disease", "r1lunge": "Lung disease", "r1drinkev": "Ever drinker",
+    "r1dyslipe": "Dyslipidemia", "r1gripsum_miss": "Grip strength (miss)",
+    "r1smoken": "Current smoker", "r1diabe": "Diabetes", "r1work": "Currently working",
+    "r1hibpe": "Hypertension", "r1cancre": "Cancer", "r1walk100a": "Difficulty walking 100m",
+    "r1stroke": "Stroke", "r1mbmi_miss": "BMI (miss)",
+}
+# One-hot columns for the single nominal predictor; code 1 (married, living with spouse) is the
+# reference category and therefore has no column of its own.
+MSTAT_LABELS = {"3": "cohabiting", "4": "separated", "5": "divorced",
+                "7": "widowed", "8": "never married"}
+
+
+def feature_label(name: str) -> str:
+    if name in FEATURE_LABELS:
+        return FEATURE_LABELS[name]
+    if name.startswith("r1mstat_"):
+        code = name.split("_", 1)[1].split(".")[0]
+        return f"Marital status: {MSTAT_LABELS.get(code, code)}"
+    return name
+
+
+def net_benefit(y_true, p, t):
+    decision = p >= t
+    tp = float(np.sum(decision & (y_true == 1))); fp = float(np.sum(decision & (y_true == 0)))
+    return (tp - fp * t / (1 - t)) / len(y_true)
+
+
+def figure3_submission(y_te, probs, out: Path, prefix: str):
+    """Submitted Figure 3: ROC curves on the internal hold-out set."""
+    fig, ax = plt.subplots(figsize=(7, 6))
+    source = []
+    for i, (name, p) in enumerate(probs.items()):
+        fpr, tpr, _ = roc_curve(y_te, p); auc = roc_auc_score(y_te, p)
+        ax.plot(fpr, tpr, color=PALETTE[i], lw=2, label=f"{name} (AUC={auc:.3f})")
+        # Thinned operating points, enough to redraw the curve. The corresponding cut-points are
+        # deliberately not written out: they are the per-participant predicted probabilities, and
+        # this repository releases aggregate values only.
+        step = max(1, len(fpr) // 200)
+        for a, b in zip(fpr[::step], tpr[::step]):
+            source.append({"model": name, "auc": auc, "fpr": a, "tpr": b})
+    ax.plot([0, 1], [0, 1], "k--", alpha=0.4)
+    ax.set_xlabel("False Positive Rate"); ax.set_ylabel("True Positive Rate")
+    ax.set_title("ROC Curves — High-Risk Depression Trajectory")
+    ax.legend(loc="lower right", fontsize=9); ax.set_aspect("equal")
+    fig.tight_layout(); fig.savefig(out / f"{prefix}_Fig3_roc.png", dpi=300); plt.close(fig)
+    pd.DataFrame(source).to_csv(out / f"{prefix}_Fig3_source_values.csv", index=False)
+
+
+def figure4_submission(y_te, probs, out: Path, prefix: str):
+    """Submitted Figure 4: confusion matrices at the nominal 0.5 cut-off on raw probabilities."""
+    from sklearn.metrics import ConfusionMatrixDisplay
+    fig, axes = plt.subplots(1, 3, figsize=(14, 4))
+    source = []
+    for ax, (name, p) in zip(axes, probs.items()):
+        cm = confusion_matrix(y_te, (p >= .5).astype(int)); auc = roc_auc_score(y_te, p)
+        ConfusionMatrixDisplay(cm, display_labels=["Other", "High-risk"]).plot(
+            ax=ax, cmap="Blues", colorbar=False, values_format="d")
+        ax.set_title(f"{name}\nAUC={auc:.3f}")
+        tn, fp, fn, tp = cm.ravel()
+        source.append({"model": name, "auc": auc, "true_negative": tn, "false_positive": fp,
+                       "false_negative": fn, "true_positive": tp,
+                       "sensitivity": tp / (tp + fn), "specificity": tn / (tn + fp)})
+    fig.tight_layout(); fig.savefig(out / f"{prefix}_Fig4_confusion.png", dpi=300); plt.close(fig)
+    pd.DataFrame(source).to_csv(out / f"{prefix}_Fig4_source_values.csv", index=False)
+
+
+def figure5_submission(y_te, probs, cprobs, out: Path, prefix: str):
+    """Submitted two-panel figure: decile calibration and decision curves, raw versus Platt.
+
+    Deciles are quantile-based, matching the Methods description. Aggregate source values are
+    written next to the figure so that every plotted point can be checked without the
+    participant-level data.
+    """
+    from matplotlib.lines import Line2D
+    prevalence = float(np.mean(y_te))
+    fig, (axc, axd) = plt.subplots(1, 2, figsize=(12, 5))
+    axc.plot([0, 1], [0, 1], "k--", alpha=.4, lw=1)
+    source = []
+    for i, name in enumerate(probs):
+        raw_obs, raw_pred = calibration_curve(y_te, probs[name], n_bins=10, strategy="quantile")
+        axc.plot(raw_pred, raw_obs, "--", color=PALETTE[i], alpha=.4, lw=1.2, marker="o", markersize=3)
+        cal_obs, cal_pred = calibration_curve(y_te, cprobs[name], n_bins=10, strategy="quantile")
+        brier = brier_score_loss(y_te, cprobs[name])
+        axc.plot(cal_pred, cal_obs, "-", color=PALETTE[i], lw=1.9, marker="s", markersize=4,
+                 label=f"{name} (Brier={brier:.3f})")
+        for scale, pred, obs in (("raw", raw_pred, raw_obs), ("platt", cal_pred, cal_obs)):
+            for d, (pp, oo) in enumerate(zip(pred, obs), start=1):
+                source.append({"panel": "a_calibration", "model": name, "probability": scale,
+                               "decile": d, "mean_predicted": pp, "observed_fraction": oo})
+    axc.set_xlabel("Mean predicted probability"); axc.set_ylabel("Fraction of positives")
+    axc.set_title("(a) Calibration")
+    hc, lc = axc.get_legend_handles_labels()
+    axc.legend([Line2D([0], [0], color="k", ls="--", alpha=.4)] + hc +
+               [Line2D([0], [0], color="grey", ls="--", alpha=.5, marker="o", markersize=3)],
+               ["Perfectly calibrated"] + lc + ["Raw (dashed)"], fontsize=7.5, loc="upper left")
+
+    grid = np.arange(0.01, 0.60, 0.01)
+    axd.plot(grid, prevalence - (1 - prevalence) * grid / (1 - grid), "k:", lw=1.2)
+    axd.axhline(0, color="grey", ls="--", lw=1)
+    for i, name in enumerate(probs):
+        raw_nb = [net_benefit(y_te, probs[name], t) for t in grid]
+        cal_nb = [net_benefit(y_te, cprobs[name], t) for t in grid]
+        axd.plot(grid, raw_nb, "--", color=PALETTE[i], alpha=.4, lw=1.2)
+        axd.plot(grid, cal_nb, "-", color=PALETTE[i], lw=1.9, label=name)
+        for t, rn, cn in zip(grid, raw_nb, cal_nb):
+            source.append({"panel": "b_decision_curve", "model": name, "threshold": round(float(t), 2),
+                           "net_benefit_raw": rn, "net_benefit_platt": cn,
+                           "treat_all": prevalence - (1 - prevalence) * t / (1 - t), "treat_none": 0.0})
+    axd.set_xlabel("Threshold probability"); axd.set_ylabel("Net benefit")
+    axd.set_title("(b) Decision curve analysis"); axd.set_xlim(0, 0.6); axd.set_ylim(-0.05, 0.20)
+    hd, ld = axd.get_legend_handles_labels()
+    axd.legend([Line2D([0], [0], color="k", ls=":"), Line2D([0], [0], color="grey", ls="--")] + hd +
+               [Line2D([0], [0], color="grey", ls="--", alpha=.5)],
+               ["Treat all", "Treat none"] + ld + ["Raw (dashed)"], fontsize=7.5, loc="upper right")
+    fig.tight_layout()
+    fig.savefig(out / f"{prefix}_Fig5_calibration_dca.png", dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    pd.DataFrame(source).to_csv(out / f"{prefix}_Fig5_source_values.csv", index=False)
+
+
+def figure6_submission(values, xt, names_out, out: Path, prefix: str, top: int = 20):
+    """Submitted SHAP figure: mean absolute importance bars behind a signed bee swarm."""
+    from matplotlib.cm import ScalarMappable
+    from matplotlib.colors import LinearSegmentedColormap, Normalize
+    xt = np.asarray(xt, dtype=float)
+    mean_abs = np.abs(values).mean(axis=0)
+    order = np.argsort(mean_abs)[::-1][:top]
+    shap_top, x_top = values[:, order], xt[:, order]
+    labels = [feature_label(names_out[i]) for i in order]
+    heights = mean_abs[order]; n_feat = len(order); rows = np.arange(n_feat)[::-1]
+
+    fig, ax_bot = plt.subplots(figsize=(13, 11)); ax_top = ax_bot.twiny()
+    ax_top.set_zorder(1); ax_bot.set_zorder(2); ax_bot.patch.set_visible(False)
+    ax_top.barh(rows, heights, color="#dfecf7", edgecolor="none", height=.78, alpha=.85, zorder=0)
+    ax_top.set_xlim(0, heights.max() * 1.05)
+    ax_top.set_xlabel("Mean absolute SHAP value (Feature Importance)", fontsize=13, labelpad=8)
+    ax_top.tick_params(axis="x", labelsize=11)
+    for i in range(n_feat - 1):
+        ax_bot.axhline(rows[i] - .5, color="lightgrey", lw=.5, ls=":", alpha=.6, zorder=1.5)
+    span = shap_top.max() - shap_top.min()
+    ax_bot.set_xlim(shap_top.min() - span * .04, shap_top.max() + span * .04)
+    ax_bot.axvline(0, color="dimgrey", lw=1., alpha=.8, zorder=2)
+    cmap = LinearSegmentedColormap.from_list("shap_bluered", ["#1f77ff", "#9b4dca", "#ff2b3d"])
+    jitter_rng = np.random.RandomState(RNG)
+    for row in range(n_feat):
+        sv = shap_top[:, row]; fv = x_top[:, row]
+        lo, hi = np.nanmin(fv), np.nanmax(fv)
+        fv_norm = (fv - lo) / (hi - lo) if hi > lo else np.full_like(fv, .5)
+        o = np.argsort(np.abs(sv)); sv, fv_norm = sv[o], fv_norm[o]
+        ax_bot.scatter(sv, rows[row] + jitter_rng.uniform(-.22, .22, size=len(sv)), c=fv_norm,
+                       cmap=cmap, s=12, alpha=.85, edgecolor="none", zorder=5, vmin=0, vmax=1)
+    ax_bot.set_yticks(rows); ax_bot.set_yticklabels(labels, fontsize=12)
+    ax_bot.set_ylim(-.6, n_feat - .4)
+    ax_bot.set_xlabel("SHAP value contribution (Bee swarm)", fontsize=13, labelpad=8)
+    ax_bot.set_ylabel("Features", fontsize=13, labelpad=8)
+    ax_bot.tick_params(axis="x", labelsize=11); ax_bot.tick_params(axis="y", labelsize=12)
+    for side in ("top", "right"): ax_bot.spines[side].set_visible(False)
+    ax_top.spines["right"].set_visible(False)
+    sm = ScalarMappable(norm=Normalize(0, 1), cmap=cmap); sm.set_array([])
+    cbar = fig.colorbar(sm, ax=ax_bot, fraction=.028, pad=.02, aspect=28)
+    cbar.set_ticks([.02, .98]); cbar.set_ticklabels(["Low", "High"])
+    cbar.ax.tick_params(labelsize=12); cbar.set_label("Feature value", fontsize=13, labelpad=4)
+    fig.tight_layout()
+    fig.savefig(out / f"{prefix}_Fig6_shap.png", dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    pd.DataFrame({"rank": np.arange(1, n_feat + 1), "feature": [names_out[i] for i in order],
+                  "label": labels, "mean_abs_shap": heights,
+                  "shap_min": shap_top.min(0), "shap_max": shap_top.max(0)}
+                 ).to_csv(out / f"{prefix}_Fig6_source_values.csv", index=False)
 
 
 def evaluate(df, outcome, out: Path, quick=False, prefix="main", figures=True):
@@ -185,8 +407,15 @@ def evaluate(df, outcome, out: Path, quick=False, prefix="main", figures=True):
         pred = p >= .5; tn, fp, fn, tp = confusion_matrix(y[te], pred).ravel()
         lo, hi = bootstrap_auc(y[te], p, boots); slope, intercept = calibration_metrics(y[te], p)
         cslope, cintercept = calibration_metrics(y[te], pc)
+        pr_lo, pr_hi = percentile_ci(y[te], p, average_precision_score, boots)
+        br_lo, br_hi = percentile_ci(y[te], p, brier_score_loss, boots)
+        bc_lo, bc_hi = percentile_ci(y[te], pc, brier_score_loss, boots)
         rows.append({"model": name, "auc": roc_auc_score(y[te], p), "auc_lo": lo, "auc_hi": hi,
-                     "pr_auc": average_precision_score(y[te], p), "precision_ppv": precision_score(y[te], pred),
+                     "pr_auc": average_precision_score(y[te], p),
+                     "pr_auc_lo": pr_lo, "pr_auc_hi": pr_hi,
+                     "brier_raw_lo": br_lo, "brier_raw_hi": br_hi,
+                     "brier_calibrated_lo": bc_lo, "brier_calibrated_hi": bc_hi,
+                     "precision_ppv": precision_score(y[te], pred),
                      "recall_sensitivity": recall_score(y[te], pred), "specificity": tn/(tn+fp),
                      "f1": f1_score(y[te], pred), "npv": tn/(tn+fn), "brier_raw": brier_score_loss(y[te], p),
                      "calibration_slope_raw": slope, "calibration_intercept_raw": intercept,
@@ -225,43 +454,14 @@ def evaluate(df, outcome, out: Path, quick=False, prefix="main", figures=True):
             dlo,dhi=np.percentile(deltas,[2.5,97.5])
             pairs.append({"model_a": names[i], "model_b": names[j], "delta_auc": delta,
                           "delta_auc_lo":dlo,"delta_auc_hi":dhi,"delong_p": pval})
+    # Holm-adjusted P values accompany the raw DeLong P values.
+    for row, adj in zip(pairs, holm_adjust([q["delong_p"] for q in pairs])):
+        row["delong_p_holm"] = adj
     pd.DataFrame(pairs).to_csv(out/f"{prefix}_delong.csv", index=False)
 
     if figures:
-        fig, ax = plt.subplots();
-        for offset, (name, p) in enumerate(probs.items()):
-            fpr, tpr, _ = roc_curve(y[te], p); line = ax.plot(fpr, tpr, label=name)[0]
-            grid, lo_band, hi_band = bootstrap_roc_band(y[te], p, boots, RNG+offset)
-            ax.fill_between(grid, lo_band, hi_band, color=line.get_color(), alpha=.15, linewidth=0)
-        ax.plot([0,1],[0,1], "k--"); ax.set(xlabel="False-positive rate", ylabel="True-positive rate"); ax.legend()
-        fig.tight_layout(); fig.savefig(out/f"{prefix}_roc.png", dpi=300); plt.close(fig)
-        fig, ax = plt.subplots()
-        for name in names:
-            obs, pred = calibration_curve(y[te], probs[name], n_bins=10)
-            line = ax.plot(pred, obs, marker="o", linestyle="--", alpha=.7, label=f"{name} raw")[0]
-            obs, pred = calibration_curve(y[te], cprobs[name], n_bins=10)
-            brier = brier_score_loss(y[te], cprobs[name])
-            ax.plot(pred, obs, marker="o", color=line.get_color(),
-                    label=f"{name} Platt (Brier={brier:.3f})")
-        ax.plot([0,1],[0,1], "k--"); ax.set(xlabel="Predicted probability", ylabel="Observed proportion"); ax.legend()
-        fig.tight_layout(); fig.savefig(out/f"{prefix}_calibration.png", dpi=300); plt.close(fig)
-        fig,ax=plt.subplots()
-        ddf=pd.DataFrame(dca)
-        for name in names:
-            raw=ddf[(ddf.model==name)&(ddf.probability=="raw")]
-            platt=ddf[(ddf.model==name)&(ddf.probability=="platt")]
-            line=ax.plot(raw.threshold,raw.net_benefit,marker="o",linestyle="--",alpha=.7,label=f"{name} raw")[0]
-            ax.plot(platt.threshold,platt.net_benefit,marker="o",color=line.get_color(),label=f"{name} Platt")
-        z=ddf[(ddf.model==names[0])&(ddf.probability=="platt")]
-        ax.plot(z.threshold,z.treat_all,"k--",label="Treat all"); ax.axhline(0,color="gray",label="Treat none")
-        ax.set(xlabel="Threshold probability",ylabel="Net benefit"); ax.legend(); fig.tight_layout()
-        fig.savefig(out/f"{prefix}_decision_curve.png",dpi=300); plt.close(fig)
-        fig,axes=plt.subplots(1,3,figsize=(10,3))
-        for ax,(name,p) in zip(axes,probs.items()):
-            cm=confusion_matrix(y[te],p>=.5); image=ax.imshow(cm,cmap="Blues")
-            for (r,c),v in np.ndenumerate(cm): ax.text(c,r,str(v),ha="center",va="center")
-            ax.set(title=name,xlabel="Predicted",ylabel="Observed",xticks=[0,1],yticks=[0,1])
-        fig.tight_layout(); fig.savefig(out/f"{prefix}_confusion_matrices.png",dpi=300); plt.close(fig)
+        figure3_submission(y[te], probs, out, prefix)
+        figure4_submission(y[te], probs, out, prefix)
 
     # Aggregate SHAP output; no participant predictions are saved.
     try:
@@ -272,8 +472,9 @@ def evaluate(df, outcome, out: Path, quick=False, prefix="main", figures=True):
         imp = pd.DataFrame({"feature": names_out, "mean_abs_shap": np.abs(values).mean(0)}).sort_values("mean_abs_shap", ascending=False)
         imp.to_csv(out/f"{prefix}_shap_importance.csv", index=False)
         if figures:
-            shap.summary_plot(values, xt, feature_names=names_out, show=False)
-            plt.tight_layout(); plt.savefig(out/f"{prefix}_shap.png", dpi=300); plt.close()
+            # Submitted figure compositions.
+            figure5_submission(y[te], probs, cprobs, out, prefix)
+            figure6_submission(values, xt, names_out, out, prefix)
     except ImportError:
         print("SHAP unavailable; install the locked requirements for SHAP outputs")
     return {"train_n": len(tr), "test_n": len(te), "positive_n": int(y.sum()), "rows": rows}
@@ -299,17 +500,64 @@ def xgb_grid_search(df, y, out):
     grid={"model__max_depth":[3,5,7],"model__learning_rate":[.01,.05,.1],
           "model__n_estimators":[300,500,700],"model__subsample":[.8,1.0],
           "model__colsample_bytree":[.8,1.0]}
+    # n_jobs only distributes the 108 configurations across processes; each configuration is fitted
+    # single-threaded with a fixed seed, so the search result is unchanged.
     gs=GridSearchCV(pipe,grid,scoring="roc_auc",cv=StratifiedKFold(5,shuffle=True,random_state=RNG),
-                    n_jobs=1,refit=False,return_train_score=False).fit(X.iloc[tr],y[tr])
+                    n_jobs=6,refit=False,return_train_score=False).fit(X.iloc[tr],y[tr])
     cols=[c for c in gs.cv_results_ if c.startswith("param_")]+["mean_test_score","std_test_score","rank_test_score"]
     pd.DataFrame(gs.cv_results_)[cols].sort_values("rank_test_score").to_csv(out/"table_s5_xgb_grid_search.csv",index=False)
 
 
+def impute_shlt_training_only(work, base_features, train, seed):
+    """One stochastic draw of r1shlt from a training-only multinomial logit.
+
+    Self-rated health is the only variable imputed under this scheme, so the chained
+    equation collapses to a single conditional model. Fitting it on the training rows
+    with observed r1shlt and then applying it to both partitions keeps hold-out
+    outcomes and hold-out r1shlt values out of the estimation, while still allowing
+    the hold-out covariates to be used at prediction time, as is standard.
+    """
+    predictors = [c for c in base_features if c != "r1shlt"]
+    z = work[predictors].copy()
+    for c in predictors:  # training-derived centre for the imputation-model inputs
+        fill = z.iloc[train][c].median() if c in FEATS_NUM else z.iloc[train][c].mode().iloc[0]
+        z[c] = z[c].fillna(fill)
+    observed = work.r1shlt.notna().to_numpy()
+    fit_rows = np.intersect1d(train, np.flatnonzero(observed))
+    clf = Pipeline([("scale", StandardScaler()),
+                    ("lr", LogisticRegression(max_iter=2000, solver="lbfgs"))])
+    clf.fit(z.iloc[fit_rows], work.r1shlt.iloc[fit_rows].astype(int))
+    out = work.copy()
+    gap = np.flatnonzero(~observed)
+    if gap.size:
+        proba = clf.predict_proba(z.iloc[gap]); classes = clf.classes_
+        rng = np.random.default_rng(seed)
+        draws = [rng.choice(classes, p=row) for row in proba]
+        out.iloc[gap, out.columns.get_loc("r1shlt")] = draws
+    return out
+
+
+def pool_auc_rubin(aucs, y_test):
+    """Rubin's rules on the logit-AUC scale; returns pooled AUC and a 95% interval."""
+    a = np.clip(np.asarray(aucs, dtype=float), 1e-6, 1 - 1e-6)
+    lg = np.log(a / (1 - a)); m = len(a)
+    n1 = int(np.sum(y_test == 1)); n0 = int(np.sum(y_test == 0))
+    q_bar = lg.mean()
+    # Hanley-McNeil SE per completed dataset, carried onto the logit scale.
+    within = []
+    for ai in a:
+        q1 = ai / (2 - ai); q2 = 2 * ai**2 / (1 + ai)
+        var_auc = (ai*(1-ai) + (n1-1)*(q1-ai**2) + (n0-1)*(q2-ai**2)) / (n1*n0)
+        within.append(var_auc / (ai*(1-ai))**2)
+    u_bar = float(np.mean(within)); b = float(np.var(lg, ddof=1)) if m > 1 else 0.0
+    total = u_bar + (1 + 1/m) * b
+    lo_lg, hi_lg = q_bar - 1.96*np.sqrt(total), q_bar + 1.96*np.sqrt(total)
+    inv = lambda v: 1 / (1 + np.exp(-v))
+    return float(inv(q_bar)), float(inv(lo_lg)), float(inv(hi_lg))
+
+
 def missingness_sensitivity(df, outcomes, out, quick):
     """Table S4A/B: change only r1shlt handling; pool MICE metrics over m=20."""
-    from sklearn.experimental import enable_iterative_imputer  # noqa: F401
-    from sklearn.impute import IterativeImputer
-    from sklearn.linear_model import BayesianRidge
     import shap
 
     def fit_once(work, y, train, test, features):
@@ -334,21 +582,13 @@ def missingness_sensitivity(df, outcomes, out, quick):
             if scheme == "missing_indicator":
                 work["r1shlt_miss"] = work.r1shlt.isna().astype(int); features.append("r1shlt_miss")
             if scheme == "mice_m20":
-                # The chained equation uses all predictors, but only its r1shlt column replaces
-                # the original data; every other variable retains main-analysis handling. Each
-                # completed dataset is then passed through the identical locked 70/30 pipeline.
-                mice_cols = base_features
                 for j in range(20):
-                    imp = IterativeImputer(estimator=BayesianRidge(), sample_posterior=True,
-                                           max_iter=10, random_state=RNG+j)
-                    completed = imp.fit_transform(work[mice_cols])
-                    shlt_col = mice_cols.index("r1shlt")
-                    imputed = work.copy()
-                    imputed["r1shlt"] = np.clip(np.rint(completed[:, shlt_col]), 1, 5)
+                    imputed = impute_shlt_training_only(work, base_features, train, RNG+j)
                     p, importance = fit_once(imputed, y, train, test, features)
                     aucs.append(roc_auc_score(y[test], p)); imps.append(importance); final_p = p
                 importance = pd.concat(imps, axis=1).mean(axis=1)
-                auc = float(np.mean(aucs)); lo, hi = min(aucs), max(aucs); interval = "across-imputation range"
+                auc, lo, hi = pool_auc_rubin(aucs, y[test])
+                interval = "Rubin-pooled 95% CI (m=20)"
             else:
                 final_p, importance = fit_once(work, y, train, test, features)
                 auc = roc_auc_score(y[test], final_p); lo, hi = bootstrap_auc(y[test], final_p, boots)
@@ -376,15 +616,20 @@ def sex_stratified(df, y, out, quick):
         x,pre=design(df,features); spw=np.sum(y[tr]==0)/np.sum(y[tr]==1)
         model=estimators(pre,spw,quick)["XGBoost"]; model.fit(x.iloc[tr],y[tr]); p=model.predict_proba(x.iloc[te])[:,1]
         cal=CalibratedClassifierCV(clone(model),method="sigmoid",cv=5).fit(x.iloc[tr],y[tr]); pc=cal.predict_proba(x.iloc[te])[:,1]
-        lo,hi=bootstrap_auc(y[te],p,100 if quick else 2000)
+        boots=100 if quick else 2000
+        lo,hi=bootstrap_auc(y[te],p,boots)
+        clo,chi=bootstrap_auc(y[te],pc,boots)  # Table 5 reports an interval for the recalibrated AUC too
         row={"sex":label,"train_n":len(tr),"test_n":len(te),"scale_pos_weight":spw,"auc_raw":roc_auc_score(y[te],p),
-             "auc_lo":lo,"auc_hi":hi,"auc_calibrated":roc_auc_score(y[te],pc),"brier_raw":brier_score_loss(y[te],p),
+             "auc_lo":lo,"auc_hi":hi,"auc_calibrated":roc_auc_score(y[te],pc),
+             "auc_calibrated_lo":clo,"auc_calibrated_hi":chi,"brier_raw":brier_score_loss(y[te],p),
              "brier_calibrated":brier_score_loss(y[te],pc)}
         try:
             import shap
             xt=model.named_steps["pre"].transform(x.iloc[te]); vals=shap.TreeExplainer(model.named_steps["model"]).shap_values(xt)
-            names=model.named_steps["pre"].get_feature_names_out(); top=np.argsort(np.abs(vals).mean(0))[::-1][:5]
+            names=model.named_steps["pre"].get_feature_names_out(); mean_abs=np.abs(vals).mean(0)
+            top=np.argsort(mean_abs)[::-1][:5]
             row["top_five_shap"]="; ".join(names[top])
+            row["top_five_shap_values"]="; ".join(f"{names[i]} ({mean_abs[i]:.3f})" for i in top)
         except ImportError: pass
         rows.append(row)
     pd.DataFrame(rows).to_csv(out/"table5_sex_stratified.csv",index=False)
@@ -422,6 +667,15 @@ def main():
     res=evaluate(df,merged,args.output_dir,args.quick,"robust_merged",figures=False)
     robust.append({"definition":"merged top two","positive_n":int(merged.sum()),"xgb_auc":next(x["auc"] for x in res["rows"] if x["model"]=="XGBoost")})
     pd.DataFrame(robust).to_csv(args.output_dir/"table_s2_outcome_robustness.csv",index=False)
+
+    # Table S7 assembles the interval-bearing comparison metrics of the two panels.
+    s7_cols=["model","pr_auc","pr_auc_lo","pr_auc_hi","brier_raw","brier_raw_lo","brier_raw_hi",
+             "brier_calibrated","brier_calibrated_lo","brier_calibrated_hi"]
+    s7=[]
+    for tag,prefix in (("A_primary_W1_W4","main"),("B_prospective_W2_W4","prospective")):
+        panel_df=pd.read_csv(args.output_dir/f"{prefix}_performance.csv")[s7_cols].copy()
+        panel_df.insert(0,"panel",tag); s7.append(panel_df)
+    pd.concat(s7).to_csv(args.output_dir/"table_s7_interval_metrics.csv",index=False)
 
     manifest={"seed":RNG,"quick_mode":args.quick,"analytic_n":len(df),"main_positive_n":int(y.sum()),
               "train_n":main_result["train_n"],"test_n":main_result["test_n"],"prospective_k":k}

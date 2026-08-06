@@ -1,0 +1,9 @@
+{
+  "seed": 42,
+  "quick_mode": false,
+  "analytic_n": 9439,
+  "main_positive_n": 1301,
+  "train_n": 6607,
+  "test_n": 2832,
+  "prospective_k": 5
+}

@@ -30,6 +30,43 @@ intended only as a technical smoke test.
 
 Seed 42 is used for randomized analysis steps.
 
+## Released boundary
+
+This repository does not contain the complete analysis code for the study. It contains the
+analysis code from `final_analytic_dataset.csv` onward, which covers preprocessing inside the
+modelling pipeline, model fitting, recalibration, decision curve analysis, SHAP computation,
+the sensitivity and robustness analyses, and the generation of every reported table and figure,
+including the submitted compositions for Figures 3 to 6. The upstream data-preparation code
+that builds `final_analytic_dataset.csv` from CHARLS is not released.
+
+## Figure source values
+
+Figures 3 to 6 of the submitted manuscript are the unmodified output of this repository. Running
+`reproduce_analysis.py` writes `main_Fig3_roc.png`, `main_Fig4_confusion.png`,
+`main_Fig5_calibration_dca.png` and `main_Fig6_shap.png`, which reproduce the submitted files
+and are byte-identical to them on the locked environment recorded in `requirements.txt`; on
+other platforms or font configurations the rendered bytes may differ while the plotted values
+do not. Figure 1 is a study flow diagram drawn by hand and Figure 2 is the trajectory plot;
+neither depends on the modelling code.
+
+`figure_source_values/` holds the aggregate values behind the two composite figures, so they can
+be checked without running the analysis and without access to participant-level data: the
+calibration-curve points and net-benefit values for both panels of Figure 5, and the per-feature
+mean absolute SHAP values with their ranges for Figure 6. These files contain no
+participant-level rows, and they are the output of the run recorded in
+`figure_source_values/run_manifest.json`. Running the script writes the aggregate values behind
+every other reported figure and table to the output directory as well.
+
+
+## Preprocessing note
+
+Predictors are declared by measurement scale before modelling. Binary predictors enter as
+indicator columns, ordinal predictors (educational attainment, self-rated health) keep their
+ordinal codes, and the single nominal predictor (marital status) is one-hot encoded inside the
+pipeline with married as the reference category. Imputation, scaling, and encoding are all
+fitted on training folds only. In the multiple-imputation sensitivity analysis the imputation
+model is fitted within the training set and then applied to both partitions.
+
 ## License
 
 The MIT license applies only to the source code in this repository, not to CHARLS data or any
