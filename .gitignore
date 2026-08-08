@@ -14,9 +14,8 @@ results/
 results_*/
 
 # Aggregate outputs that ARE released (no participant-level rows)
-figure_source_values/*
-!figure_source_values/main_Fig5_source_values.csv
-!figure_source_values/main_Fig6_source_values.csv
+!figure_source_values/
+!figure_source_values/*.csv
 !figure_source_values/run_manifest.json
 *.log
 

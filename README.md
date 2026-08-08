@@ -39,23 +39,32 @@ the sensitivity and robustness analyses, and the generation of every reported ta
 including the submitted compositions for Figures 3 to 6. The upstream data-preparation code
 that builds `final_analytic_dataset.csv` from CHARLS is not released.
 
+## Missing-data sensitivity analysis (Table S4)
+
+`missingness_sensitivity()` re-runs the locked pipeline under three handlings of self-rated health
+(`r1shlt`) and changes nothing else, namely mode imputation as used in the main analysis, mode
+imputation plus a binary missingness indicator, and complete cases. Intervals are bootstrap
+percentile intervals in every arm. A multiple-imputation arm was explored during revision and is
+not part of the reported analysis; it has been removed from this script and from Table S4.
+
 ## Figure source values
+
+`figure_source_values/` holds the aggregate values behind every reported figure and table, so
+the figures can be checked without access to participant-level data. These files contain no
+participant-level rows, and they are the output of the run recorded in
+`figure_source_values/run_manifest.json`.
 
 Figures 3 to 6 of the submitted manuscript are the unmodified output of this repository. Running
 `reproduce_analysis.py` writes `main_Fig3_roc.png`, `main_Fig4_confusion.png`,
 `main_Fig5_calibration_dca.png` and `main_Fig6_shap.png`, which reproduce the submitted files
 and are byte-identical to them on the locked environment recorded in `requirements.txt`; on
 other platforms or font configurations the rendered bytes may differ while the plotted values
-do not. Figure 1 is a study flow diagram drawn by hand and Figure 2 is the trajectory plot;
-neither depends on the modelling code.
-
-`figure_source_values/` holds the aggregate values behind the two composite figures, so they can
-be checked without running the analysis and without access to participant-level data: the
-calibration-curve points and net-benefit values for both panels of Figure 5, and the per-feature
-mean absolute SHAP values with their ranges for Figure 6. These files contain no
-participant-level rows, and they are the output of the run recorded in
-`figure_source_values/run_manifest.json`. Running the script writes the aggregate values behind
-every other reported figure and table to the output directory as well.
+do not. The run also writes the source values behind each figure: ROC coordinates for
+Figure 3, confusion-matrix cells for Figure 4, calibration-curve points and net-benefit values
+for both panels of Figure 5, and per-feature mean absolute SHAP values with their ranges for
+Figure 6. Figure 1 is a study flow diagram drawn by hand and Figure 2 is the trajectory plot;
+neither depends on the modelling code. The remaining files correspond to the numbered tables of
+the manuscript and Additional file 1.
 
 
 ## Preprocessing note
@@ -64,8 +73,7 @@ Predictors are declared by measurement scale before modelling. Binary predictors
 indicator columns, ordinal predictors (educational attainment, self-rated health) keep their
 ordinal codes, and the single nominal predictor (marital status) is one-hot encoded inside the
 pipeline with married as the reference category. Imputation, scaling, and encoding are all
-fitted on training folds only. In the multiple-imputation sensitivity analysis the imputation
-model is fitted within the training set and then applied to both partitions.
+fitted on training folds only.
 
 ## License
 

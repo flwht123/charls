@@ -75,7 +75,8 @@ FEATS_ORDINAL = ["raeduc_c", "r1shlt"]           # monotone levels, kept as orde
 # everything else in FEATS_CAT is binary (0/1 or 1/2) and needs no encoding.
 
 
-def design(df: pd.DataFrame, features: list[str] | None = None):
+def design(df: pd.DataFrame, features: list[str] | None = None,
+           onehot_nominal: bool = True):
     features = features or FEATS_NUM + FEATS_CAT
     num = [c for c in FEATS_NUM if c in features]
     cat = [c for c in features if c not in num]
@@ -84,7 +85,7 @@ def design(df: pd.DataFrame, features: list[str] | None = None):
         if c in x:
             x[c + "_miss"] = x[c].isna().astype(int)
             cat.append(c + "_miss")
-    nominal = [c for c in cat if c in FEATS_NOMINAL]
+    nominal = [c for c in cat if c in FEATS_NOMINAL] if onehot_nominal else []
     plain = [c for c in cat if c not in nominal]
     blocks = [
         ("num", Pipeline([("imp", SimpleImputer(strategy="median")), ("scale", StandardScaler())]), num),
@@ -508,56 +509,8 @@ def xgb_grid_search(df, y, out):
     pd.DataFrame(gs.cv_results_)[cols].sort_values("rank_test_score").to_csv(out/"table_s5_xgb_grid_search.csv",index=False)
 
 
-def impute_shlt_training_only(work, base_features, train, seed):
-    """One stochastic draw of r1shlt from a training-only multinomial logit.
-
-    Self-rated health is the only variable imputed under this scheme, so the chained
-    equation collapses to a single conditional model. Fitting it on the training rows
-    with observed r1shlt and then applying it to both partitions keeps hold-out
-    outcomes and hold-out r1shlt values out of the estimation, while still allowing
-    the hold-out covariates to be used at prediction time, as is standard.
-    """
-    predictors = [c for c in base_features if c != "r1shlt"]
-    z = work[predictors].copy()
-    for c in predictors:  # training-derived centre for the imputation-model inputs
-        fill = z.iloc[train][c].median() if c in FEATS_NUM else z.iloc[train][c].mode().iloc[0]
-        z[c] = z[c].fillna(fill)
-    observed = work.r1shlt.notna().to_numpy()
-    fit_rows = np.intersect1d(train, np.flatnonzero(observed))
-    clf = Pipeline([("scale", StandardScaler()),
-                    ("lr", LogisticRegression(max_iter=2000, solver="lbfgs"))])
-    clf.fit(z.iloc[fit_rows], work.r1shlt.iloc[fit_rows].astype(int))
-    out = work.copy()
-    gap = np.flatnonzero(~observed)
-    if gap.size:
-        proba = clf.predict_proba(z.iloc[gap]); classes = clf.classes_
-        rng = np.random.default_rng(seed)
-        draws = [rng.choice(classes, p=row) for row in proba]
-        out.iloc[gap, out.columns.get_loc("r1shlt")] = draws
-    return out
-
-
-def pool_auc_rubin(aucs, y_test):
-    """Rubin's rules on the logit-AUC scale; returns pooled AUC and a 95% interval."""
-    a = np.clip(np.asarray(aucs, dtype=float), 1e-6, 1 - 1e-6)
-    lg = np.log(a / (1 - a)); m = len(a)
-    n1 = int(np.sum(y_test == 1)); n0 = int(np.sum(y_test == 0))
-    q_bar = lg.mean()
-    # Hanley-McNeil SE per completed dataset, carried onto the logit scale.
-    within = []
-    for ai in a:
-        q1 = ai / (2 - ai); q2 = 2 * ai**2 / (1 + ai)
-        var_auc = (ai*(1-ai) + (n1-1)*(q1-ai**2) + (n0-1)*(q2-ai**2)) / (n1*n0)
-        within.append(var_auc / (ai*(1-ai))**2)
-    u_bar = float(np.mean(within)); b = float(np.var(lg, ddof=1)) if m > 1 else 0.0
-    total = u_bar + (1 + 1/m) * b
-    lo_lg, hi_lg = q_bar - 1.96*np.sqrt(total), q_bar + 1.96*np.sqrt(total)
-    inv = lambda v: 1 / (1 + np.exp(-v))
-    return float(inv(q_bar)), float(inv(lo_lg)), float(inv(hi_lg))
-
-
 def missingness_sensitivity(df, outcomes, out, quick):
-    """Table S4A/B: change only r1shlt handling; pool MICE metrics over m=20."""
+    """Table S4A/B: change only r1shlt handling."""
     import shap
 
     def fit_once(work, y, train, test, features):
@@ -573,26 +526,16 @@ def missingness_sensitivity(df, outcomes, out, quick):
     for panel, y in outcomes.items():
         y = np.asarray(y, dtype=int)
         tr, te = train_test_split(np.arange(len(y)), test_size=.3, stratify=y, random_state=RNG)
-        for scheme in ("mode", "missing_indicator", "complete_case", "mice_m20"):
+        for scheme in ("mode", "missing_indicator", "complete_case"):
             work = df.copy(); train = tr.copy(); test = te.copy(); features = base_features.copy()
-            aucs, imps, final_p = [], [], None
             if scheme == "complete_case":
                 complete = np.flatnonzero(work.r1shlt.notna().to_numpy())
                 train, test = train_test_split(complete, test_size=.3, stratify=y[complete], random_state=RNG)
             if scheme == "missing_indicator":
                 work["r1shlt_miss"] = work.r1shlt.isna().astype(int); features.append("r1shlt_miss")
-            if scheme == "mice_m20":
-                for j in range(20):
-                    imputed = impute_shlt_training_only(work, base_features, train, RNG+j)
-                    p, importance = fit_once(imputed, y, train, test, features)
-                    aucs.append(roc_auc_score(y[test], p)); imps.append(importance); final_p = p
-                importance = pd.concat(imps, axis=1).mean(axis=1)
-                auc, lo, hi = pool_auc_rubin(aucs, y[test])
-                interval = "Rubin-pooled 95% CI (m=20)"
-            else:
-                final_p, importance = fit_once(work, y, train, test, features)
-                auc = roc_auc_score(y[test], final_p); lo, hi = bootstrap_auc(y[test], final_p, boots)
-                interval = "95% bootstrap percentile CI"
+            final_p, importance = fit_once(work, y, train, test, features)
+            auc = roc_auc_score(y[test], final_p); lo, hi = bootstrap_auc(y[test], final_p, boots)
+            interval = "95% bootstrap percentile CI"
             ordered = importance.sort_values(ascending=False)
             rows.append({"panel": panel, "method": scheme, "analytic_n": len(train)+len(test),
                          "positive_n": int(y[np.r_[train,test]].sum()), "auc": auc,
