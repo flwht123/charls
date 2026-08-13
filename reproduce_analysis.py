@@ -198,6 +198,12 @@ def delong(y, a, b):
 
 
 PALETTE = ["#4E79A7", "#59A14F", "#F28E2B", "#E15759", "#B07AA1"]
+DISPLAY_NAMES = {
+    "Logistic": "Logistic regression",
+    "RandomForest": "Random forest",
+    "XGBoost": "XGBoost",
+}
+LINE_STYLES = ["-", "--", "-."]
 
 FEATURE_LABELS = {
     "r1arthre": "Arthritis", "r1shlt": "Self-rated health", "ragender": "Sex (female)",
@@ -233,25 +239,35 @@ def net_benefit(y_true, p, t):
     return (tp - fp * t / (1 - t)) / len(y_true)
 
 
-def figure3_submission(y_te, probs, out: Path, prefix: str):
-    """Submitted Figure 3: ROC curves on the internal hold-out set."""
+def figure3_submission(y_te, probs, out: Path, prefix: str, boots: int = 2000):
+    """Submitted Figure 3: ROC curves on the internal hold-out set.
+
+    Each curve carries a pointwise 95% bootstrap band on the same resample basis as the
+    reported AUC intervals, so that the overlap between the three models is visible directly
+    rather than only through the multiplicity-corrected tests.
+    """
     fig, ax = plt.subplots(figsize=(7, 6))
-    source = []
+    source, band_source = [], []
     for i, (name, p) in enumerate(probs.items()):
         fpr, tpr, _ = roc_curve(y_te, p); auc = roc_auc_score(y_te, p)
-        ax.plot(fpr, tpr, color=PALETTE[i], lw=2, label=f"{name} (AUC={auc:.3f})")
+        grid, lo, hi = bootstrap_roc_band(y_te, p, boots)
+        ax.fill_between(grid, lo, hi, color=PALETTE[i], alpha=0.12, linewidth=0)
+        ax.plot(fpr, tpr, color=PALETTE[i], lw=2, ls=LINE_STYLES[i],
+                label=f"{DISPLAY_NAMES[name]} (AUC={auc:.3f})")
         # Thinned operating points, enough to redraw the curve. The corresponding cut-points are
         # deliberately not written out: they are the per-participant predicted probabilities, and
         # this repository releases aggregate values only.
         step = max(1, len(fpr) // 200)
         for a, b in zip(fpr[::step], tpr[::step]):
             source.append({"model": name, "auc": auc, "fpr": a, "tpr": b})
+        for g, a, b in zip(grid, lo, hi):
+            band_source.append({"model": name, "fpr": g, "tpr_lo": a, "tpr_hi": b})
     ax.plot([0, 1], [0, 1], "k--", alpha=0.4)
     ax.set_xlabel("False Positive Rate"); ax.set_ylabel("True Positive Rate")
-    ax.set_title("ROC Curves — High-Risk Depression Trajectory")
     ax.legend(loc="lower right", fontsize=9); ax.set_aspect("equal")
     fig.tight_layout(); fig.savefig(out / f"{prefix}_Fig3_roc.png", dpi=300); plt.close(fig)
     pd.DataFrame(source).to_csv(out / f"{prefix}_Fig3_source_values.csv", index=False)
+    pd.DataFrame(band_source).to_csv(out / f"{prefix}_Fig3_band_source_values.csv", index=False)
 
 
 def figure4_submission(y_te, probs, out: Path, prefix: str):
@@ -263,7 +279,8 @@ def figure4_submission(y_te, probs, out: Path, prefix: str):
         cm = confusion_matrix(y_te, (p >= .5).astype(int)); auc = roc_auc_score(y_te, p)
         ConfusionMatrixDisplay(cm, display_labels=["Other", "High-risk"]).plot(
             ax=ax, cmap="Blues", colorbar=False, values_format="d")
-        ax.set_title(f"{name}\nAUC={auc:.3f}")
+        # AUC is threshold-free and is not annotated here: this panel shows one 0.5 cut-point.
+        ax.set_title(DISPLAY_NAMES[name])
         tn, fp, fn, tp = cm.ravel()
         source.append({"model": name, "auc": auc, "true_negative": tn, "false_positive": fp,
                        "false_negative": fn, "true_positive": tp,
@@ -461,7 +478,7 @@ def evaluate(df, outcome, out: Path, quick=False, prefix="main", figures=True):
     pd.DataFrame(pairs).to_csv(out/f"{prefix}_delong.csv", index=False)
 
     if figures:
-        figure3_submission(y[te], probs, out, prefix)
+        figure3_submission(y[te], probs, out, prefix, boots)
         figure4_submission(y[te], probs, out, prefix)
 
     # Aggregate SHAP output; no participant predictions are saved.

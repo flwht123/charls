@@ -24,7 +24,7 @@ python -m venv .venv
 .venv/Scripts/python reproduce_analysis.py --data final_analytic_dataset.csv
 ```
 
-Aggregate tables and figures are written to `results/`. The complete analysis can take several
+Aggregate tables and figures are written to `results/`. The full released workflow can take several
 hours. `--quick` reduces the number of trees, bootstrap resamples, and repeated splits and is
 intended only as a technical smoke test.
 
@@ -35,36 +35,46 @@ Seed 42 is used for randomized analysis steps.
 This repository does not contain the complete analysis code for the study. It contains the
 analysis code from `final_analytic_dataset.csv` onward, which covers preprocessing inside the
 modelling pipeline, model fitting, recalibration, decision curve analysis, SHAP computation,
-the sensitivity and robustness analyses, and the generation of every reported table and figure,
-including the submitted compositions for Figures 3 to 6. The upstream data-preparation code
+and the documented downstream sensitivity and robustness analyses. The script directly
+generates the submitted compositions for Figures 3 to 6 and CSV source values for the modelling
+outputs that it explicitly writes (performance and interval metrics, repeated hold-out analyses,
+DeLong comparisons, predicted-positive burden and decision curves, SHAP, XGBoost grid search,
+missing-data sensitivity, sex-stratified analysis, prospective GMM enumeration, and outcome-
+definition robustness). It does not generate Figure 1, the primary trajectory plot in Figure 2,
+or the upstream cohort-construction and descriptive tables. The upstream data-preparation code
 that builds `final_analytic_dataset.csv` from CHARLS is not released.
 
 ## Missing-data sensitivity analysis (Table S4)
 
-`missingness_sensitivity()` re-runs the locked pipeline under three handlings of self-rated health
-(`r1shlt`) and changes nothing else, namely mode imputation as used in the main analysis, mode
-imputation plus a binary missingness indicator, and complete cases. Intervals are bootstrap
-percentile intervals in every arm. A multiple-imputation arm was explored during revision and is
-not part of the reported analysis; it has been removed from this script and from Table S4.
+`missingness_sensitivity()` re-runs the pipeline under three handlings of self-rated health
+(`r1shlt`), namely mode imputation as used in the main analysis, mode imputation plus a binary
+missingness indicator, and complete cases. The first two use the same within-panel split. The
+complete-case arm excludes missing `r1shlt` observations and then creates a new stratified 70/30
+split with the same rule and seed (42); all other modelling settings remain unchanged. Intervals
+are bootstrap percentile intervals in every arm. A multiple-imputation arm was explored during
+revision and is not part of the reported analysis; it has been removed from this script and from
+Table S4.
 
 ## Figure source values
 
-`figure_source_values/` holds the aggregate values behind every reported figure and table, so
-the figures can be checked without access to participant-level data. These files contain no
-participant-level rows, and they are the output of the run recorded in
+`figure_source_values/` holds the aggregate outputs produced by the released script for Figures
+3 to 6 and for the downstream modelling tables described above, so those results can be checked
+without access to participant-level data. It is not a complete source-value archive for Figure
+1, Figure 2, or the upstream cohort and descriptive tables. These files contain no participant-
+level rows, and they are the output of the run recorded in
 `figure_source_values/run_manifest.json`.
 
-Figures 3 to 6 of the submitted manuscript are the unmodified output of this repository. Running
+Figures 3 to 6 of the submitted manuscript were generated directly by this repository. Running
 `reproduce_analysis.py` writes `main_Fig3_roc.png`, `main_Fig4_confusion.png`,
-`main_Fig5_calibration_dca.png` and `main_Fig6_shap.png`, which reproduce the submitted files
-and are byte-identical to them on the locked environment recorded in `requirements.txt`; on
-other platforms or font configurations the rendered bytes may differ while the plotted values
-do not. The run also writes the source values behind each figure: ROC coordinates for
-Figure 3, confusion-matrix cells for Figure 4, calibration-curve points and net-benefit values
-for both panels of Figure 5, and per-feature mean absolute SHAP values with their ranges for
-Figure 6. Figure 1 is a study flow diagram drawn by hand and Figure 2 is the trajectory plot;
-neither depends on the modelling code. The remaining files correspond to the numbered tables of
-the manuscript and Additional file 1.
+`main_Fig5_calibration_dca.png` and `main_Fig6_shap.png`. Rendering metadata and therefore file
+hashes can vary across runs or platforms, while the plotted values can be checked against the
+released aggregate source files. The run writes the source values behind each figure: ROC
+coordinates and pointwise 95% bootstrap-band limits for Figure 3, confusion-matrix cells for
+Figure 4, calibration-curve points and net-benefit values for both panels of Figure 5, and
+per-feature mean absolute SHAP values with their ranges for Figure 6. Figure 1 is a study flow
+diagram drawn by hand. Figure 2 and the upstream cohort and descriptive tables are outside this
+script's output boundary. The remaining files are aggregate source values for the downstream
+modelling results explicitly generated by `reproduce_analysis.py`.
 
 
 ## Preprocessing note
