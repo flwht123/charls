@@ -5,18 +5,13 @@ stratification of persistently high depressive-symptom trajectories in CHARLS.
 
 ## Data
 
-The participant-level analytic dataset is not included. CHARLS and Harmonized CHARLS data are
-subject to their respective data-use terms. This repository intentionally does not distribute
-raw data, derived participant-level data, or the data-preparation code.
-
-The analysis starts from a local file named `final_analytic_dataset.csv`. Its construction,
-variable definitions, inclusion criteria, and preprocessing procedures are described in the
-manuscript and supplementary material. The required model columns are listed explicitly in
-`reproduce_analysis.py`.
+No participant-level data are distributed here. CHARLS and Harmonized CHARLS remain subject to
+their own data-use terms. The analysis starts from a local `final_analytic_dataset.csv`, whose
+required model columns are listed in `reproduce_analysis.py`.
 
 ## Run
 
-The submitted analysis used Python 3.12.10 and the package versions in `requirements.txt`.
+Python 3.12.10 with the package versions in `requirements.txt`; seed 42.
 
 ```bash
 python -m venv .venv
@@ -24,66 +19,26 @@ python -m venv .venv
 .venv/Scripts/python reproduce_analysis.py --data final_analytic_dataset.csv
 ```
 
-Aggregate tables and figures are written to `results/`. The full released workflow can take several
-hours. `--quick` reduces the number of trees, bootstrap resamples, and repeated splits and is
-intended only as a technical smoke test.
-
-Seed 42 is used for randomized analysis steps.
+Outputs are written to `results/`. A full run takes several hours; `--quick` is a technical
+smoke test only.
 
 ## Released boundary
 
-This repository does not contain the complete analysis code for the study. It contains the
-analysis code from `final_analytic_dataset.csv` onward, which covers preprocessing inside the
-modelling pipeline, model fitting, recalibration, decision curve analysis, SHAP computation,
-and the documented downstream sensitivity and robustness analyses. The script directly
-generates the submitted compositions for Figures 3 to 6 and CSV source values for the modelling
-outputs that it explicitly writes (performance and interval metrics, repeated hold-out analyses,
-DeLong comparisons, predicted-positive burden and decision curves, SHAP, XGBoost grid search,
-missing-data sensitivity, sex-stratified analysis, prospective GMM enumeration, and outcome-
-definition robustness). It does not generate Figure 1, the primary trajectory plot in Figure 2,
-or the upstream cohort-construction and descriptive tables. The upstream data-preparation code
-that builds `final_analytic_dataset.csv` from CHARLS is not released.
+Released: the analysis from `final_analytic_dataset.csv` onward, covering preprocessing inside
+the modelling pipeline, model fitting, recalibration, decision curve analysis, SHAP, the
+downstream sensitivity and robustness analyses, and Figures 3 to 6.
 
-## Missing-data sensitivity analysis (Table S4)
+Not released: the data-preparation code that builds `final_analytic_dataset.csv` from CHARLS,
+Figure 1, the trajectory plot in Figure 2, and the upstream cohort-construction and descriptive
+tables.
 
-`missingness_sensitivity()` re-runs the pipeline under three handlings of self-rated health
-(`r1shlt`), namely mode imputation as used in the main analysis, mode imputation plus a binary
-missingness indicator, and complete cases. The first two use the same within-panel split. The
-complete-case arm excludes missing `r1shlt` observations and then creates a new stratified 70/30
-split with the same rule and seed (42); all other modelling settings remain unchanged. Intervals
-are bootstrap percentile intervals in every arm. A multiple-imputation arm was explored during
-revision and is not part of the reported analysis; it has been removed from this script and from
-Table S4.
-
-## Figure source values
-
-`figure_source_values/` holds the aggregate outputs produced by the released script for Figures
-3 to 6 and for the downstream modelling tables described above, so those results can be checked
-without access to participant-level data. It is not a complete source-value archive for Figure
-1, Figure 2, or the upstream cohort and descriptive tables. These files contain no participant-
-level rows, and they are the output of the run recorded in
-`figure_source_values/run_manifest.json`.
-
-Figures 3 to 6 of the submitted manuscript were generated directly by this repository. Running
-`reproduce_analysis.py` writes `main_Fig3_roc.png`, `main_Fig4_confusion.png`,
-`main_Fig5_calibration_dca.png` and `main_Fig6_shap.png`. Rendering metadata and therefore file
-hashes can vary across runs or platforms, while the plotted values can be checked against the
-released aggregate source files. The run writes the source values behind each figure: ROC
-coordinates and pointwise 95% bootstrap-band limits for Figure 3, confusion-matrix cells for
-Figure 4, calibration-curve points and net-benefit values for both panels of Figure 5, and
-per-feature mean absolute SHAP values with their ranges for Figure 6. Figure 1 is a study flow
-diagram drawn by hand. Figure 2 and the upstream cohort and descriptive tables are outside this
-script's output boundary. The remaining files are aggregate source values for the downstream
-modelling results explicitly generated by `reproduce_analysis.py`.
-
-
-## Preprocessing note
-
-Predictors are declared by measurement scale before modelling. Binary predictors enter as
-indicator columns, ordinal predictors (educational attainment, self-rated health) keep their
-ordinal codes, and the single nominal predictor (marital status) is one-hot encoded inside the
-pipeline with married as the reference category. Imputation, scaling, and encoding are all
-fitted on training folds only.
+`figure_source_values/` is the released copy of the aggregate values behind the modelling
+results: for the submitted figures, the ROC coordinates and pointwise 95% bootstrap-band limits
+of Figure 3, the confusion-matrix cells of Figure 4, the calibration points and net-benefit
+values of both panels of Figure 5, and the per-feature mean absolute SHAP values with their
+ranges of Figure 6; the remaining files hold the downstream modelling results. Nothing outside
+that boundary is covered, no file contains participant-level rows, and all are the output of the
+run recorded in `figure_source_values/run_manifest.json`.
 
 ## License
 

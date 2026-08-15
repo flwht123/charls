@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import argparse
 import json
 from pathlib import Path
@@ -10,6 +8,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import shap
 import statsmodels.api as sm
 from sklearn.base import clone
 from sklearn.calibration import CalibratedClassifierCV, calibration_curve
@@ -71,12 +70,11 @@ THRESHOLDS = [0.05, 0.10, 0.138, 0.20, 0.30, 0.40, 0.50]
 # Marital status carries the non-consecutive Harmonized CHARLS codes 1/3/4/5/7/8, so an
 # ordered numeric representation would impose distances that have no substantive meaning.
 FEATS_NOMINAL = ["r1mstat"]                      # one-hot, reference = code 1 (married)
-FEATS_ORDINAL = ["raeduc_c", "r1shlt"]           # monotone levels, kept as ordered codes
-# everything else in FEATS_CAT is binary (0/1 or 1/2) and needs no encoding.
+# The ordinal predictors (raeduc_c, r1shlt) keep their monotone codes, and everything else in
+# FEATS_CAT is binary (0/1 or 1/2), so neither group needs encoding.
 
 
-def design(df: pd.DataFrame, features: list[str] | None = None,
-           onehot_nominal: bool = True):
+def design(df: pd.DataFrame, features: list[str] | None = None):
     features = features or FEATS_NUM + FEATS_CAT
     num = [c for c in FEATS_NUM if c in features]
     cat = [c for c in features if c not in num]
@@ -85,7 +83,7 @@ def design(df: pd.DataFrame, features: list[str] | None = None,
         if c in x:
             x[c + "_miss"] = x[c].isna().astype(int)
             cat.append(c + "_miss")
-    nominal = [c for c in cat if c in FEATS_NOMINAL] if onehot_nominal else []
+    nominal = [c for c in cat if c in FEATS_NOMINAL]
     plain = [c for c in cat if c not in nominal]
     blocks = [
         ("num", Pipeline([("imp", SimpleImputer(strategy="median")), ("scale", StandardScaler())]), num),
@@ -185,7 +183,6 @@ def holm_adjust(pvals):
 
 def delong(y, a, b):
     order = np.argsort(-np.asarray(y)); m = int(np.sum(y)); preds = np.vstack([a, b])[:, order]
-    # n is the number of negatives, read off the sample axis.
     n = preds.shape[1] - m
     pos, neg = preds[:, :m], preds[:, m:]; tx = np.array([midrank(x) for x in pos])
     ty = np.array([midrank(x) for x in neg]); tz = np.array([midrank(x) for x in preds])
@@ -240,12 +237,7 @@ def net_benefit(y_true, p, t):
 
 
 def figure3_submission(y_te, probs, out: Path, prefix: str, boots: int = 2000):
-    """Submitted Figure 3: ROC curves on the internal hold-out set.
-
-    Each curve carries a pointwise 95% bootstrap band on the same resample basis as the
-    reported AUC intervals, so that the overlap between the three models is visible directly
-    rather than only through the multiplicity-corrected tests.
-    """
+    """Submitted Figure 3: ROC curves with pointwise 95% bootstrap bands."""
     fig, ax = plt.subplots(figsize=(7, 6))
     source, band_source = [], []
     for i, (name, p) in enumerate(probs.items()):
@@ -254,9 +246,7 @@ def figure3_submission(y_te, probs, out: Path, prefix: str, boots: int = 2000):
         ax.fill_between(grid, lo, hi, color=PALETTE[i], alpha=0.12, linewidth=0)
         ax.plot(fpr, tpr, color=PALETTE[i], lw=2, ls=LINE_STYLES[i],
                 label=f"{DISPLAY_NAMES[name]} (AUC={auc:.3f})")
-        # Thinned operating points, enough to redraw the curve. The corresponding cut-points are
-        # deliberately not written out: they are the per-participant predicted probabilities, and
-        # this repository releases aggregate values only.
+        # Thinned operating points, enough to redraw the curve.
         step = max(1, len(fpr) // 200)
         for a, b in zip(fpr[::step], tpr[::step]):
             source.append({"model": name, "auc": auc, "fpr": a, "tpr": b})
@@ -279,7 +269,6 @@ def figure4_submission(y_te, probs, out: Path, prefix: str):
         cm = confusion_matrix(y_te, (p >= .5).astype(int)); auc = roc_auc_score(y_te, p)
         ConfusionMatrixDisplay(cm, display_labels=["Other", "High-risk"]).plot(
             ax=ax, cmap="Blues", colorbar=False, values_format="d")
-        # AUC is threshold-free and is not annotated here: this panel shows one 0.5 cut-point.
         ax.set_title(DISPLAY_NAMES[name])
         tn, fp, fn, tp = cm.ravel()
         source.append({"model": name, "auc": auc, "true_negative": tn, "false_positive": fp,
@@ -290,12 +279,7 @@ def figure4_submission(y_te, probs, out: Path, prefix: str):
 
 
 def figure5_submission(y_te, probs, cprobs, out: Path, prefix: str):
-    """Submitted two-panel figure: decile calibration and decision curves, raw versus Platt.
-
-    Deciles are quantile-based, matching the Methods description. Aggregate source values are
-    written next to the figure so that every plotted point can be checked without the
-    participant-level data.
-    """
+    """Submitted two-panel figure: quantile-decile calibration and decision curves."""
     from matplotlib.lines import Line2D
     prevalence = float(np.mean(y_te))
     fig, (axc, axd) = plt.subplots(1, 2, figsize=(12, 5))
@@ -414,7 +398,6 @@ def evaluate(df, outcome, out: Path, quick=False, prefix="main", figures=True):
                             "sensitivity": recall_score(y[val_ix], pred_cv), "specificity": tn/(tn+fp),
                             "f1": f1_score(y[val_ix], pred_cv), "brier": brier_score_loss(y[val_ix], p_cv)})
     cv_detail = pd.DataFrame(cv_rows)
-    cv_detail.to_csv(out/f"{prefix}_fivefold_cv_folds.csv", index=False)
     cv_detail.groupby("model", as_index=False).agg(
         auc=("auc","mean"), sensitivity=("sensitivity","mean"), specificity=("specificity","mean"),
         f1=("f1","mean"), brier=("brier","mean")).to_csv(out/f"{prefix}_fivefold_cv_summary.csv", index=False)
@@ -472,7 +455,6 @@ def evaluate(df, outcome, out: Path, quick=False, prefix="main", figures=True):
             dlo,dhi=np.percentile(deltas,[2.5,97.5])
             pairs.append({"model_a": names[i], "model_b": names[j], "delta_auc": delta,
                           "delta_auc_lo":dlo,"delta_auc_hi":dhi,"delong_p": pval})
-    # Holm-adjusted P values accompany the raw DeLong P values.
     for row, adj in zip(pairs, holm_adjust([q["delong_p"] for q in pairs])):
         row["delong_p_holm"] = adj
     pd.DataFrame(pairs).to_csv(out/f"{prefix}_delong.csv", index=False)
@@ -482,20 +464,15 @@ def evaluate(df, outcome, out: Path, quick=False, prefix="main", figures=True):
         figure4_submission(y[te], probs, out, prefix)
 
     # Aggregate SHAP output; no participant predictions are saved.
-    try:
-        import shap
-        xgb = fitted["XGBoost"]; xt = xgb.named_steps["pre"].transform(X.iloc[te])
-        values = shap.TreeExplainer(xgb.named_steps["model"]).shap_values(xt)
-        names_out = xgb.named_steps["pre"].get_feature_names_out()
-        imp = pd.DataFrame({"feature": names_out, "mean_abs_shap": np.abs(values).mean(0)}).sort_values("mean_abs_shap", ascending=False)
-        imp.to_csv(out/f"{prefix}_shap_importance.csv", index=False)
-        if figures:
-            # Submitted figure compositions.
-            figure5_submission(y[te], probs, cprobs, out, prefix)
-            figure6_submission(values, xt, names_out, out, prefix)
-    except ImportError:
-        print("SHAP unavailable; install the locked requirements for SHAP outputs")
-    return {"train_n": len(tr), "test_n": len(te), "positive_n": int(y.sum()), "rows": rows}
+    xgb = fitted["XGBoost"]; xt = xgb.named_steps["pre"].transform(X.iloc[te])
+    values = shap.TreeExplainer(xgb.named_steps["model"]).shap_values(xt)
+    names_out = xgb.named_steps["pre"].get_feature_names_out()
+    imp = pd.DataFrame({"feature": names_out, "mean_abs_shap": np.abs(values).mean(0)}).sort_values("mean_abs_shap", ascending=False)
+    imp.to_csv(out/f"{prefix}_shap_importance.csv", index=False)
+    if figures:
+        figure5_submission(y[te], probs, cprobs, out, prefix)
+        figure6_submission(values, xt, names_out, out, prefix)
+    return {"train_n": len(tr), "test_n": len(te), "rows": rows}
 
 
 def repeated_splits(df, y, out, quick):
@@ -506,7 +483,11 @@ def repeated_splits(df, y, out, quick):
         for name, model in estimators(pre, spw, quick).items():
             model.fit(X.iloc[tr], y[tr]); rows.append({"split":seed,"model":name,
                 "auc":roc_auc_score(y[te],model.predict_proba(X.iloc[te])[:,1])})
-    pd.DataFrame(rows).to_csv(out/"table3_repeated_holdout.csv",index=False)
+    detail = pd.DataFrame(rows)
+    summary = detail.groupby("model", as_index=False).agg(n_splits=("auc","size"), mean_auc=("auc","mean"))
+    summary["auc_p2_5"] = detail.groupby("model").auc.quantile(.025).values
+    summary["auc_p97_5"] = detail.groupby("model").auc.quantile(.975).values
+    summary.to_csv(out/"repeated_holdout_summary.csv",index=False)
 
 
 def xgb_grid_search(df, y, out):
@@ -528,7 +509,6 @@ def xgb_grid_search(df, y, out):
 
 def missingness_sensitivity(df, outcomes, out, quick):
     """Table S4A/B: change only r1shlt handling."""
-    import shap
 
     def fit_once(work, y, train, test, features):
         x, pre = design(work, features); spw = np.sum(y[train] == 0) / np.sum(y[train] == 1)
@@ -578,19 +558,16 @@ def sex_stratified(df, y, out, quick):
         cal=CalibratedClassifierCV(clone(model),method="sigmoid",cv=5).fit(x.iloc[tr],y[tr]); pc=cal.predict_proba(x.iloc[te])[:,1]
         boots=100 if quick else 2000
         lo,hi=bootstrap_auc(y[te],p,boots)
-        clo,chi=bootstrap_auc(y[te],pc,boots)  # Table 5 reports an interval for the recalibrated AUC too
+        clo,chi=bootstrap_auc(y[te],pc,boots)
         row={"sex":label,"train_n":len(tr),"test_n":len(te),"scale_pos_weight":spw,"auc_raw":roc_auc_score(y[te],p),
              "auc_lo":lo,"auc_hi":hi,"auc_calibrated":roc_auc_score(y[te],pc),
              "auc_calibrated_lo":clo,"auc_calibrated_hi":chi,"brier_raw":brier_score_loss(y[te],p),
              "brier_calibrated":brier_score_loss(y[te],pc)}
-        try:
-            import shap
-            xt=model.named_steps["pre"].transform(x.iloc[te]); vals=shap.TreeExplainer(model.named_steps["model"]).shap_values(xt)
-            names=model.named_steps["pre"].get_feature_names_out(); mean_abs=np.abs(vals).mean(0)
-            top=np.argsort(mean_abs)[::-1][:5]
-            row["top_five_shap"]="; ".join(names[top])
-            row["top_five_shap_values"]="; ".join(f"{names[i]} ({mean_abs[i]:.3f})" for i in top)
-        except ImportError: pass
+        xt=model.named_steps["pre"].transform(x.iloc[te]); vals=shap.TreeExplainer(model.named_steps["model"]).shap_values(xt)
+        names=model.named_steps["pre"].get_feature_names_out(); mean_abs=np.abs(vals).mean(0)
+        top=np.argsort(mean_abs)[::-1][:5]
+        row["top_five_shap"]="; ".join(names[top])
+        row["top_five_shap_values"]="; ".join(f"{names[i]} ({mean_abs[i]:.3f})" for i in top)
         rows.append(row)
     pd.DataFrame(rows).to_csv(out/"table5_sex_stratified.csv",index=False)
 
